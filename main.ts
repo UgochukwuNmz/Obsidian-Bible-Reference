@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS: BibleReferenceSettings = {
   pythonBinaryPath: '/path/to/python3', // Update as needed
   bibleParserScriptPath: '/path/to/bible_parser.py', // Update as needed
 
-  passageDirectory: 'Bible Passages',
+  passageDirectory: 'Sources/Bible Passages',
   debugMode: false,
   existingBibleFolder: 'Sources/The Bible',
 
