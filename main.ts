@@ -9,32 +9,23 @@ import {
   Notice,
 } from 'obsidian';
 import { spawn } from 'child_process';
+import * as path from 'path';
 
 /**
  * Configuration interface for the Bible Reference plugin.
  */
 interface BibleReferenceSettings {
   pythonBinaryPath: string;
-  bibleParserScriptPath: string;
-
   passageDirectory: string;
-  debugMode: boolean;
   existingBibleFolder: string;
-
-  validBibleBooksPath: string;
-  bibleStructurePath: string;
+  debugMode: boolean;
 }
 
 const DEFAULT_SETTINGS: BibleReferenceSettings = {
-  pythonBinaryPath: '/path/to/python3', // Update as needed
-  bibleParserScriptPath: '/path/to/bible_parser.py', // Update as needed
-
-  passageDirectory: 'Sources/Bible Passages',
+  pythonBinaryPath: '/path/to/python3',
+  passageDirectory: 'Bible Passages',
+  existingBibleFolder: 'The Bible',
   debugMode: false,
-  existingBibleFolder: 'Sources/The Bible',
-
-  validBibleBooksPath: 'Utility/valid_bible_books.json',
-  bibleStructurePath: 'Utility/bible_structure.json',
 };
 
 
@@ -129,55 +120,39 @@ export default class BibleReferencePlugin extends Plugin {
   }
 
   /**
-   * Loads the VALID_BIBLE_BOOKS dataset from an external JSON file.
+   * Loads the VALID_BIBLE_BOOKS dataset from the plugin's directory.
    */
   public async loadValidBibleBooks() {
-    const filePath = this.settings.validBibleBooksPath;
     try {
-      const file = this.app.vault.getAbstractFileByPath(filePath);
-      if (file && file instanceof TFile) {
-        const content = await this.app.vault.read(file);
-        this.VALID_BIBLE_BOOKS = JSON.parse(content);
-        this.debugLog('VALID_BIBLE_BOOKS loaded successfully.');
-        
-        // Log all loaded book names
-        const loadedBooks = Object.keys(this.VALID_BIBLE_BOOKS);
-        this.debugLog(`Loaded VALID_BIBLE_BOOKS: ${loadedBooks.join(', ')}`);
-      } else {
-        this.debugLog(`valid_bible_books.json not found at path: "${filePath}".`);
-        new Notice(`Bible book aliases data not found. Please ensure "valid_bible_books.json" is placed correctly.`);
-      }
+      const pluginDir = this.app.vault.configDir; // This points to .obsidian directory
+      const filePath = `${pluginDir}/plugins/${this.manifest.id}/valid_bible_books.json`;
+
+      const content = await this.app.vault.adapter.read(filePath);
+      this.VALID_BIBLE_BOOKS = JSON.parse(content);
+
+      console.log('VALID_BIBLE_BOOKS loaded successfully:', this.VALID_BIBLE_BOOKS);
     } catch (error) {
       console.error('Error loading valid_bible_books.json:', error);
-      this.debugLog('Failed to load VALID_BIBLE_BOOKS.');
-      new Notice(`Failed to load Bible book aliases. Check console for details.`);
+      new Notice(`Failed to load "valid_bible_books.json". Ensure the file exists in the plugin's directory.`);
     }
   }
 
 
   /**
-   * Loads the BIBLE_STRUCTURE dataset from an external JSON file.
+   * Loads the BIBLE_STRUCTURE dataset from the plugin's directory.
    */
   public async loadBibleStructure() {
-    const structurePath = this.settings.bibleStructurePath;
     try {
-      const file = this.app.vault.getAbstractFileByPath(structurePath);
-      if (file && file instanceof TFile) {
-        const content = await this.app.vault.read(file);
-        this.BIBLE_STRUCTURE = JSON.parse(content);
-        this.debugLog('BIBLE_STRUCTURE loaded successfully.');
-        
-        // Log all loaded book names
-        const loadedBooks = Object.keys(this.BIBLE_STRUCTURE);
-        this.debugLog(`Loaded BIBLE_STRUCTURE: ${loadedBooks.join(', ')}`);
-      } else {
-        this.debugLog(`bible_structure.json not found at path: "${structurePath}".`);
-        new Notice(`Bible structure data not found. Please ensure "bible_structure.json" is placed correctly.`);
-      }
+      const pluginDir = this.app.vault.configDir; // This points to .obsidian directory
+      const filePath = `${pluginDir}/plugins/${this.manifest.id}/bible_structure.json`;
+
+      const content = await this.app.vault.adapter.read(filePath);
+      this.BIBLE_STRUCTURE = JSON.parse(content);
+
+      console.log('BIBLE_STRUCTURE loaded successfully:', this.BIBLE_STRUCTURE);
     } catch (error) {
       console.error('Error loading bible_structure.json:', error);
-      this.debugLog('Failed to load BIBLE_STRUCTURE.');
-      new Notice(`Failed to load Bible structure data. Check console for details.`);
+      new Notice(`Failed to load "bible_structure.json". Ensure the file exists in the plugin's directory.`);
     }
   }
 
@@ -539,7 +514,8 @@ export default class BibleReferencePlugin extends Plugin {
    */
   private async fetchPassage(reference: string): Promise<PassageData | null> {
     const pythonExe = this.settings.pythonBinaryPath || 'python3';
-    const scriptPath = this.settings.bibleParserScriptPath;
+    const vaultDir = (this.app.vault.adapter as any).basePath; // Full absolute path to the vault
+    const scriptPath = path.resolve(vaultDir, '.obsidian', 'plugins', this.manifest.id, 'bible_parser.py');
 
     return new Promise((resolve, reject) => {
       this.debugLog(`Running Python script: "${scriptPath}" with reference: "${reference}"`);
@@ -658,19 +634,6 @@ class BibleReferenceSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName('Path to bible_parser.py')
-      .setDesc('Absolute path to your "bible_parser.py" script.')
-      .addText((text) =>
-        text
-          .setPlaceholder('/path/to/bible_parser.py')
-          .setValue(this.plugin.settings.bibleParserScriptPath)
-          .onChange(async (value) => {
-            this.plugin.settings.bibleParserScriptPath = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName('Passage Note Directory')
       .setDesc('Folder where new notes are created (if none found).')
       .addText((txt) =>
@@ -704,34 +667,6 @@ class BibleReferenceSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.debugMode = value;
             await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Path to valid_bible_books.json')
-      .setDesc('Relative path within your vault to "valid_bible_books.json".')
-      .addText((text) =>
-        text
-          .setPlaceholder('valid_bible_books.json')
-          .setValue(this.plugin.settings.validBibleBooksPath)
-          .onChange(async (value) => {
-            this.plugin.settings.validBibleBooksPath = value.trim();
-            await this.plugin.saveSettings();
-            await this.plugin.loadValidBibleBooks();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName('Path to bible_structure.json')
-      .setDesc('Relative path within your vault to "bible_structure.json".')
-      .addText((text) =>
-        text
-          .setPlaceholder('bible_structure.json')
-          .setValue(this.plugin.settings.bibleStructurePath)
-          .onChange(async (value) => {
-            this.plugin.settings.bibleStructurePath = value.trim();
-            await this.plugin.saveSettings();
-            await this.plugin.loadBibleStructure();
           })
       );
   }
