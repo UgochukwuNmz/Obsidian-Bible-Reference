@@ -11,9 +11,6 @@ import {
 import { spawn } from 'child_process';
 import * as path from 'path';
 
-/**
- * Configuration interface for the Bible Reference plugin.
- */
 interface BibleReferenceSettings {
   pythonBinaryPath: string;
   passageDirectory: string;
@@ -28,28 +25,21 @@ const DEFAULT_SETTINGS: BibleReferenceSettings = {
   debugMode: false,
 };
 
-
 const PLUGIN_DISPLAY_NAME = 'Bible Reference Plugin';
 const DEBOUNCE_DELAY = 3000; // in milliseconds
 
-/**
- * Interface for structured passage data.
- */
 interface PassageData {
   canonical: string;
   passages: string[];
   query: string;
 }
 
-/**
- * Main plugin class.
- */
 export default class BibleReferencePlugin extends Plugin {
   settings: BibleReferenceSettings;
   private bibleRefRegex: RegExp;
   private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
   private filesBeingModified: Set<string> = new Set();
-  
+
   // Externalized datasets
   private BIBLE_STRUCTURE: { [key: string]: number[] } = {};
   private VALID_BIBLE_BOOKS: { [key: string]: string[] } = {};
@@ -83,8 +73,8 @@ export default class BibleReferencePlugin extends Plugin {
         '\\d+' +
         // Verse range or single verse
         '(?::\\d+)' +
-        // Optional range with chapter and verse or just verse
-        '(?:\\s?-\\s?(?:(\\d+):)?(\\d+))?',
+        // Optional verse range
+        '(?:\\s?-\\s?(\\d+))?',
       'i'
     );
 
@@ -95,33 +85,21 @@ export default class BibleReferencePlugin extends Plugin {
     console.log(`Unloading ${PLUGIN_DISPLAY_NAME}...`);
   }
 
-  /**
-   * Loads settings from the plugin’s data.json file.
-   */
   async loadSettings() {
     const loadedData = await this.loadData();
     this.settings = { ...DEFAULT_SETTINGS, ...loadedData };
   }
 
-  /**
-   * Saves the current settings to the plugin’s data.json file.
-   */
   async saveSettings() {
     await this.saveData(this.settings);
   }
 
-  /**
-   * Prints a debug message to the console if debug mode is enabled.
-   */
   private debugLog(message: string) {
     if (this.settings.debugMode) {
       console.log(`[DEBUG] ${message}`);
     }
   }
 
-  /**
-   * Loads the VALID_BIBLE_BOOKS dataset from the plugin's directory.
-   */
   public async loadValidBibleBooks() {
     try {
       const pluginDir = this.app.vault.configDir; // This points to .obsidian directory
@@ -137,10 +115,6 @@ export default class BibleReferencePlugin extends Plugin {
     }
   }
 
-
-  /**
-   * Loads the BIBLE_STRUCTURE dataset from the plugin's directory.
-   */
   public async loadBibleStructure() {
     try {
       const pluginDir = this.app.vault.configDir; // This points to .obsidian directory
@@ -156,13 +130,6 @@ export default class BibleReferencePlugin extends Plugin {
     }
   }
 
-  /* ---------------------------------------------------------------------------
-   * Event Registrations
-   * -------------------------------------------------------------------------*/
-
-  /**
-   * Trigger on file "modify" (which corresponds to save).
-   */
   private registerFileModifyEvent() {
     this.registerEvent(
       this.app.vault.on('modify', async (file: TAbstractFile) => {
@@ -191,14 +158,6 @@ export default class BibleReferencePlugin extends Plugin {
     );
   }
 
-  /* ---------------------------------------------------------------------------
-   * Core Reference Processing
-   * -------------------------------------------------------------------------*/
-
-  /**
-   * Scans the file for wiki links like [[John 3:16]] or [[Genesis 1:1]].
-   * If a match is found that looks like a Bible reference, create or link the passage note.
-   */
   private async processFileReferences(file: TFile, eventSource: string) {
     this.debugLog(`Processing references triggered by: ${eventSource} for file "${file.path}"`);
     try {
@@ -239,17 +198,39 @@ export default class BibleReferencePlugin extends Plugin {
       // Remove duplicate references
       const uniqueReferences = Array.from(new Set(referencesToProcess));
 
-      for (const reference of uniqueReferences) {
-        await this.getOrCreatePassage(reference);
-      }
-
-      // Now perform the replacements
       let updatedContent = content;
       for (const reference of uniqueReferences) {
-        const canonicalRef = reference.replace(':', '-');
+        const parsedRef = this.parseReference(reference);
+        if (!parsedRef) {
+          continue; // or handle error
+        }
+        const { bookNumber, bookName, chapter, startVerse, endVerse } = parsedRef;
+        const normalizedBookName = this.normalizeBookName(bookNumber, bookName);
+        if (!normalizedBookName) {
+          this.debugLog(`Failed to find long-form name for book: "${bookNumber ? `${bookNumber} ` : ''}${bookName}"`);
+          continue;
+        }
+        const isSingleVerse = !endVerse;
+
+        let linkTarget;
+        if (isSingleVerse) {
+          // For single verse references, link to chapter file with verse heading
+          linkTarget = `${normalizedBookName} ${chapter}#^v${startVerse}`;
+
+          // Since we're using an existing chapter file, we don't need to create a passage note
+        } else {
+          const normalizedReference = this.normalizeToLongForm(reference);
+          const canonicalRef = normalizedReference.replace(':', '-');
+          linkTarget = canonicalRef;
+
+          // For passages, get or create the passage note
+          await this.getOrCreatePassage(reference);
+        }
+
+        // Now perform the replacement
         const escapedReference = this.escapeRegExp(reference);
         const regex = new RegExp(`\\[\\[${escapedReference}\\]\\]`, 'g');
-        updatedContent = updatedContent.replace(regex, `[[${canonicalRef}|${reference}]]`);
+        updatedContent = updatedContent.replace(regex, `[[${linkTarget}|${reference}]]`);
       }
 
       if (updatedContent !== content) {
@@ -265,35 +246,19 @@ export default class BibleReferencePlugin extends Plugin {
     }
   }
 
-  /**
-   * Validates the Bible reference to ensure it follows proper syntax, has a valid book name,
-   * and that the specified chapters and verses exist within the book.
-   * For example, ensures that ranges include both chapter and verse if necessary.
-   */
   private isValidReference(reference: string): boolean {
-    // Split the reference into parts using the existing regex
-    const refRegex = /^(?:(\d+)\s)?([A-Za-z. ]+)\s+(\d+):(\d+)(?:\s?-\s?(?:(\d+):)?(\d+))?$/;
-    const match = reference.match(refRegex);
-    if (!match) {
-      this.debugLog(`Reference "${reference}" does not match the regex.`);
+    const parsedRef = this.parseReference(reference);
+    if (!parsedRef) {
       return false;
     }
 
-    const [
-      ,
-      bookNumber,
-      bookName,
-      startChapter,
-      startVerse,
-      endChapter,
-      endVerse,
-    ] = match;
+    const { bookNumber, bookName, chapter, startVerse, endVerse } = parsedRef;
 
     // Normalize the book name for validation
     const normalizedBookName = this.normalizeBookName(bookNumber, bookName);
     this.debugLog(`Normalized book name: "${normalizedBookName}"`);
 
-    if (!this.isValidBookName(normalizedBookName)) {
+    if (!normalizedBookName) {
       this.debugLog(`Book name "${normalizedBookName}" is not valid.`);
       return false;
     }
@@ -309,113 +274,123 @@ export default class BibleReferencePlugin extends Plugin {
     this.debugLog(`Book "${normalizedBookName}" has ${totalChapters} chapters.`);
 
     // Basic numerical validation
-    const startChap = parseInt(startChapter, 10);
+    const chapNum = parseInt(chapter, 10);
     const startVes = parseInt(startVerse, 10);
-    const endChap = endChapter ? parseInt(endChapter, 10) : startChap;
     const endVes = endVerse ? parseInt(endVerse, 10) : startVes;
 
-    if (isNaN(startChap) || isNaN(startVes) || isNaN(endChap) || isNaN(endVes)) {
+    if (isNaN(chapNum) || isNaN(startVes) || isNaN(endVes)) {
       this.debugLog(`Reference "${reference}" contains invalid numbers.`);
       return false;
     }
 
-    // Ensure that the start chapter exists
-    if (startChap < 1 || startChap > totalChapters) {
-      this.debugLog(`Start chapter ${startChap} does not exist in "${normalizedBookName}".`);
+    // Ensure that the chapter exists
+    if (chapNum < 1 || chapNum > totalChapters) {
+      this.debugLog(`Chapter ${chapNum} does not exist in "${normalizedBookName}".`);
       return false;
     }
 
     // Ensure that the start verse exists
-    const startChapterVerseCount = this.BIBLE_STRUCTURE[normalizedBookName][startChap - 1];
-    this.debugLog(`Book "${normalizedBookName}" Chapter ${startChap} has ${startChapterVerseCount} verses.`);
-    if (startVes < 1 || startVes > startChapterVerseCount) {
-      this.debugLog(`Start verse ${startVes} does not exist in "${normalizedBookName}" Chapter ${startChap}.`);
-      return false;
-    }
-
-    // Ensure that the end chapter exists
-    if (endChap < startChap || endChap > totalChapters) {
-      this.debugLog(`End chapter ${endChap} does not exist in "${normalizedBookName}".`);
+    const chapterVerseCount = this.BIBLE_STRUCTURE[normalizedBookName][chapNum - 1];
+    this.debugLog(`Book "${normalizedBookName}" Chapter ${chapNum} has ${chapterVerseCount} verses.`);
+    if (startVes < 1 || startVes > chapterVerseCount) {
+      this.debugLog(`Start verse ${startVes} does not exist in "${normalizedBookName}" Chapter ${chapNum}.`);
       return false;
     }
 
     // Ensure that the end verse exists
-    const endChapterVerseCount = this.BIBLE_STRUCTURE[normalizedBookName][endChap - 1];
-    this.debugLog(`Book "${normalizedBookName}" Chapter ${endChap} has ${endChapterVerseCount} verses.`);
-    if (endVes < 1 || endVes > endChapterVerseCount) {
-      this.debugLog(`End verse ${endVes} does not exist in "${normalizedBookName}" Chapter ${endChap}.`);
-      return false;
-    }
-
-    // If the range spans the same chapter, ensure end verse >= start verse
-    if (endChap === startChap && endVes < startVes) {
-      this.debugLog(`End verse ${endVes} is less than start verse ${startVes} in Chapter ${startChap}.`);
+    if (endVes < startVes || endVes > chapterVerseCount) {
+      this.debugLog(`End verse ${endVes} is invalid in "${normalizedBookName}" Chapter ${chapNum}.`);
       return false;
     }
 
     return true;
   }
 
-/**
- * Normalizes the book name by combining the numerical prefix (if any) with the book name
- * and converting shorthand names to their long-form equivalents.
- * For example, ("1", "Samuel") => "1 Samuel", or ("", "Gen") => "Genesis".
- */
   private normalizeBookName(bookNumber: string | undefined, bookName: string): string | null {
     const trimmedName = bookName.replace(/\.$/, '').trim(); // Remove trailing period and trim
-    let normalized = trimmedName;
+    let normalized: string | null = null;
 
-    // Check if the book name is a shorthand and map it to the long-form
     for (const [longForm, aliases] of Object.entries(this.VALID_BIBLE_BOOKS)) {
-      if (longForm.toLowerCase() === trimmedName.toLowerCase() || aliases.some(alias => alias.toLowerCase() === trimmedName.toLowerCase())) {
+      if (
+        longForm.toLowerCase() === `${bookNumber ? bookNumber + ' ' : ''}${trimmedName}`.toLowerCase() ||
+        aliases.some(
+          (alias) =>
+            alias.toLowerCase() === `${bookNumber ? bookNumber + ' ' : ''}${trimmedName}`.toLowerCase()
+        )
+      ) {
         normalized = longForm; // Convert to long-form name
         break;
       }
     }
 
-    // Combine with book number if provided
-    if (bookNumber) {
-      return `${bookNumber} ${normalized}`;
-    }
-
     if (!normalized) {
-      this.debugLog(`No matching long-form name found for "${bookName}".`);
-      return null; // Return null if no match is found
+      this.debugLog(`No matching long-form name found for book name: "${bookNumber ? `${bookNumber} ` : ''}${bookName}".`);
+      return null;
     }
 
     return normalized;
   }
 
-
-  /**
-   * Checks if the provided book name is a valid Bible book.
-   * Supports both full names and common abbreviations.
-   */
-  private isValidBookName(bookName: string): boolean {
-    // Iterate through each book and its aliases
-    for (const [standardName, aliases] of Object.entries(this.VALID_BIBLE_BOOKS)) {
-      this.debugLog(`Checking aliases for book "${standardName}": ${aliases.join(', ')}`);
-      for (const alias of aliases) {
-        if (alias.toLowerCase() === bookName.toLowerCase()) {
-          this.debugLog(`Match found: "${alias}" matches "${bookName}"`);
-          return true;
-        }
-      }
+  private normalizeToLongForm(reference: string): string | null {
+    const parsedRef = this.parseReference(reference);
+    if (!parsedRef) {
+      return null;
     }
-    this.debugLog(`No matching aliases found for book "${bookName}"`);
-    return false;
+
+    const { bookNumber, bookName, chapter, startVerse, endVerse } = parsedRef;
+
+    const normalizedBookName = this.normalizeBookName(bookNumber, bookName);
+    if (!normalizedBookName) {
+      this.debugLog(`Failed to find long-form name for book: "${bookNumber ? `${bookNumber} ` : ''}${bookName}"`);
+      return null;
+    }
+
+    let normalizedReference;
+    if (endVerse) {
+      normalizedReference = `${normalizedBookName} ${chapter}:${startVerse}-${endVerse}`;
+    } else {
+      normalizedReference = `${normalizedBookName} ${chapter}:${startVerse}`;
+    }
+
+    return normalizedReference.trim();
   }
 
-  /**
-   * Checks if a note already exists in the user-chosen "existingBibleFolder".
-   * If not, creates one in "passageDirectory" using data from the Python script.
-   */
+  private parseReference(
+    reference: string
+  ): {
+    bookNumber?: string;
+    bookName: string;
+    chapter: string;
+    startVerse: string;
+    endVerse?: string;
+  } | null {
+    const refRegex = /^(?:(\d+)\s)?([A-Za-z. ]+)\s+(\d+):(\d+)(?:\s?-\s?(\d+))?$/;
+    const match = reference.match(refRegex);
+
+    if (!match) {
+      this.debugLog(`Reference does not match expected format: "${reference}"`);
+      return null;
+    }
+
+    const [, bookNumber, bookName, chapter, startVerse, endVerse] = match;
+
+    return {
+      bookNumber,
+      bookName,
+      chapter,
+      startVerse,
+      endVerse,
+    };
+  }
+
   private async getOrCreatePassage(reference: string) {
     try {
+      const normalizedReference = this.normalizeToLongForm(reference);
+
       // 1. Check if an existing note by this name is in existingBibleFolder
-      const existingFile = this.findFileInFolder(this.settings.existingBibleFolder, reference);
+      const existingFile = this.findFileInFolder(this.settings.passageDirectory, normalizedReference);
       if (existingFile) {
-        this.debugLog(`Found existing note for "${reference}" at "${existingFile.path}".`);
+        this.debugLog(`Passage note already exists: "${existingFile.path}".`);
         return;
       }
 
@@ -423,7 +398,7 @@ export default class BibleReferencePlugin extends Plugin {
       await this.ensureFolderExists(this.settings.passageDirectory);
 
       // 3. Run Python script to fetch passage data
-      const passageData = await this.fetchPassage(reference);
+      const passageData = await this.fetchPassage(normalizedReference);
       if (!passageData) {
         this.debugLog(`No passage data returned for "${reference}".`);
         new Notice(`Failed to fetch passage for "${reference}".`);
@@ -442,8 +417,35 @@ export default class BibleReferencePlugin extends Plugin {
       // 5. Define the path for the new file
       const canonicalPath = `${this.settings.passageDirectory}/${canonicalRef}.md`;
 
+      // Parse the reference to generate verse links
+      const parsedRef = this.parseReference(normalizedReference);
+      if (!parsedRef) {
+        // Handle error
+        this.debugLog(`Failed to parse reference "${normalizedReference}" for verse links.`);
+        return;
+      }
+      const { bookNumber, bookName, chapter, startVerse, endVerse } = parsedRef;
+      const normalizedBookName = this.normalizeBookName(bookNumber, bookName);
+      if (!normalizedBookName) {
+        this.debugLog(`Failed to normalize book name for "${bookNumber ? bookNumber + ' ' : ''}${bookName}".`);
+        return;
+      }
+
+      // Generate verse links
+      let verseLinks = '';
+      if (chapter && startVerse) {
+        const startVerseNum = parseInt(startVerse, 10);
+        const endVerseNum = endVerse ? parseInt(endVerse, 10) : startVerseNum;
+
+        const links = [];
+        for (let v = startVerseNum; v <= endVerseNum; v++) {
+          links.push(`[[${normalizedBookName} ${chapter}#^v${v}]]`);
+        }
+        verseLinks = links.join(' ');
+      }
+
       // 6. Prepare the content
-      const content = this.formatNoteContent(passageData, reference);
+      const content = this.formatNoteContent(passageData, normalizedReference, verseLinks);
 
       // 7. Write the new file
       await this.app.vault.create(canonicalPath, content);
@@ -455,10 +457,6 @@ export default class BibleReferencePlugin extends Plugin {
     }
   }
 
-  /**
-   * Finds a file whose base name matches the reference (with ":" replaced by "-")
-   * within the specified folder path.
-   */
   private findFileInFolder(folderPath: string, reference: string): TFile | null {
     const targetBasename = reference.replace(':', '-');
 
@@ -468,7 +466,6 @@ export default class BibleReferencePlugin extends Plugin {
       return null;
     }
 
-    // Recursively search all files in that folder
     const files = this.getAllFilesInFolder(folder);
     for (const file of files) {
       if (file.basename === targetBasename) {
@@ -478,9 +475,6 @@ export default class BibleReferencePlugin extends Plugin {
     return null;
   }
 
-  /**
-   * Recursively gathers all TFile objects within a TFolder.
-   */
   private getAllFilesInFolder(folder: TFolder): TFile[] {
     let results: TFile[] = [];
     for (const child of folder.children) {
@@ -493,9 +487,6 @@ export default class BibleReferencePlugin extends Plugin {
     return results;
   }
 
-  /**
-   * Ensures the user-specified folder exists. If not, creates it.
-   */
   private async ensureFolderExists(folderPath: string) {
     const folder = this.app.vault.getAbstractFileByPath(folderPath);
     if (!folder) {
@@ -504,14 +495,6 @@ export default class BibleReferencePlugin extends Plugin {
     }
   }
 
-  /* ---------------------------------------------------------------------------
-   * Python Script Integration
-   * -------------------------------------------------------------------------*/
-
-  /**
-   * Spawns the python script with the given reference, then parses and returns
-   * the passage data.
-   */
   private async fetchPassage(reference: string): Promise<PassageData | null> {
     const pythonExe = this.settings.pythonBinaryPath || 'python3';
     const vaultDir = (this.app.vault.adapter as any).basePath; // Full absolute path to the vault
@@ -577,10 +560,8 @@ export default class BibleReferencePlugin extends Plugin {
     });
   }
 
-  /**
-   * Formats the passage data into Markdown with frontmatter aliases.
-   */
-  private formatNoteContent(passageData: PassageData, userQuery: string): string {
+  // **Modified formatNoteContent function**
+  private formatNoteContent(passageData: PassageData, userQuery: string, verseLinks?: string): string {
     const canonical = passageData.canonical ?? '';
     const aliases = new Set([canonical, passageData.query, userQuery]);
 
@@ -588,22 +569,18 @@ export default class BibleReferencePlugin extends Plugin {
 aliases: [${Array.from(aliases).map((alias) => `"${alias}"`).join(', ')}]
 cssclasses: 'bible_reference'
 ---
-    
+
 ${passageData.passages?.join('\n') ?? ''}
+
+${verseLinks ? '\n' + verseLinks : ''}
 `;
   }
 
-  /**
-   * Escapes special characters in a string for use in a regular expression.
-   */
   private escapeRegExp(string: string): string {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 }
 
-/**
- * Plugin Setting Tab for the Bible Reference plugin.
- */
 class BibleReferenceSettingTab extends PluginSettingTab {
   plugin: BibleReferencePlugin;
 
@@ -612,9 +589,6 @@ class BibleReferenceSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  /**
-   * Renders the plugin's settings UI.
-   */
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
