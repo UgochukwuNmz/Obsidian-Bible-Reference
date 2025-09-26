@@ -1,9 +1,9 @@
 {
-  "pythonBinaryPath": "/Users/emmanuel/Documents/Code/BibleGateway-to-Obsidian/.gitignore/venv/bin/python3",
-  "bibleParserScriptPath": "/Users/emmanuel/Documents/Code/BibleGateway-to-Obsidian/bible_parser.py",
-  "passageDirectory": "Sources/Bible Passages",
+  "pythonBinaryPath": "/usr/bin/python3",
+  "passageDirectory": "Reference/Bible Passages",
+  "existingBibleFolder": "Reference/The Bible",
   "debugMode": true,
-  "existingBibleFolder": "Sources/The Bible",
+  "bibleParserScriptPath": "./bible_parser.py",
   "validBibleBooksPath": "Utility/valid_bible_books.json",
   "bibleStructurePath": "Utility/bible_structure.json"
 }
